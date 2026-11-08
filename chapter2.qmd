@@ -1,0 +1,495 @@
+---
+title: "NoSQL & Spark RDD Processing"
+date: today
+---
+
+
+# Praktik Coding
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.align = "center", fig.pos = "H", out.width = "85%",
+  tidy = FALSE, R.options = list(width = 80)
+)
+
+library(knitr)
+library(reticulate)
+
+# Menyiapkan seluruh kebutuhan Python untuk praktikum Spark
+reticulate::py_require(c(
+  "numpy",
+  "pandas",
+  "pyspark",
+  "mongomock",
+  "matplotlib",
+  "pyarrow"
+))
+```
+
+
+
+```{python setup-spark, message=FALSE, warning=FALSE}
+import os, sys
+
+# Arahkan ke folder
+hadoop_home = "C:\\hadoop"
+hadoop_bin = "C:\\hadoop\\bin"
+
+os.environ["HADOOP_HOME"] = hadoop_home
+os.environ["PATH"] = hadoop_bin + os.pathsep + os.environ.get("PATH", "")
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+
+from pyspark.sql import SparkSession
+
+# Pastikan JVM membaca hadoop.dll
+spark = (
+    SparkSession.builder
+    .master("local[*]")
+    .appName("BigData-P08")
+    .config("spark.ui.showConsoleProgress", "false")
+    .config("spark.sql.shuffle.partitions", "8")
+    .config("spark.driver.memory", "2g")
+    .config("spark.driver.extraJavaOptions", "-Djava.library.path=C:/hadoop/bin")
+    .getOrCreate()
+)
+
+spark.sparkContext.setLogLevel("ERROR")
+sc = spark.sparkContext
+print("Spark versi", spark.version, "| master:", sc.master)
+```
+
+
+
+---
+
+
+```{python uts-data}
+# Import library yang dipakai
+import numpy as np
+import pandas as pd
+import os, json, tempfile
+import mongomock
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+# Seed tetap agar semua peserta mendapat data yang sama.
+rng = np.random.default_rng(2026)
+folder = tempfile.mkdtemp()
+
+# Data merchant (dokumen MongoDB)
+kategori = ["Kuliner", "Retail", "Transportasi", "Hiburan", "Kesehatan"]
+kota = ["Jakarta", "Bandung", "Surabaya", "Medan", "Makassar"]
+merchant = []
+for i in range(1, 201):
+    d = {"_id": f"M{i:03d}", "nama": f"Merchant {i}",
+         "kategori": str(rng.choice(kategori)),
+         "kota": str(rng.choice(kota)),
+         "rating": float(np.round(rng.uniform(3.0, 5.0), 1)),
+         "promo": [str(p) for p in rng.choice(["cashback", "diskon", "gratis_ongkir", "poin"],
+                                                size=rng.integers(0, 3), replace=False)]}
+
+    if rng.random() < 0.3:
+        d["jam_buka"] = {"buka": "08:00", "tutup": str(rng.choice(["21:00", "22:00", "23:59"]))}
+    merchant.append(d)
+
+# Menyimpan merchant ke MongoDB (simulator).
+db = mongomock.MongoClient()["bayaryuk"]
+db["merchant"].insert_many(merchant)
+
+
+
+# Log transaksi (berkas teks, 400 ribu baris)
+n = 400_000
+waktu = pd.Timestamp("2026-09-01") + pd.to_timedelta(rng.integers(0, 30 * 86400, n), unit="s")
+id_m = rng.choice([m["_id"] for m in merchant], n)
+nominal = np.round(rng.lognormal(10.6, 0.9, n), -2).astype(int)
+status = rng.choice(["SUKSES", "GAGAL", "PENDING"], n, p=[0.93, 0.05, 0.02])
+
+nominal[rng.choice(n, 150, replace=False)] = -1
+nominal[rng.choice(n, 80, replace=False)] = 250_000_000
+
+baris = [f"{w:%Y-%m-%d %H:%M:%S}|T{i:07d}|U{u:05d}|{m}|{v}|{s}"
+         for i, (w, u, m, v, s) in enumerate(
+             zip(waktu, rng.integers(1, 50_000, n), id_m, nominal, status))]
+
+baris[::5000] = ["ERROR koneksi timeout"] * len(baris[::5000])
+jalur_log = os.path.join(folder, "transaksi.log")
+with open(jalur_log, "w") as f:
+    _ = f.write("\n".join(baris)) 
+
+# Landing zone untuk streaming
+landing = os.path.join(folder, "landing"); os.makedirs(landing)
+for b in range(3):
+    with open(os.path.join(landing, f"batch_{b}.json"), "w") as f:
+        for k in range(500):
+            e = {"id_trx": f"S{b}{k:04d}", "id_merchant": str(rng.choice(id_m)),
+                 "nominal": int(rng.lognormal(10.6, 0.9)) if rng.random() > 0.03 else None,
+                 "waktu": str(pd.Timestamp("2026-10-01 09:00")
+                              + pd.Timedelta(minutes=b * 5 + k % 5))}
+            _ = f.write(json.dumps(e) + "\n")
+
+# Summary dataset
+print("Merchant:", db["merchant"].count_documents({}),
+      "| baris log:", len(baris),
+      "| berkas landing:", len(os.listdir(landing)))
+```
+
+
+
+---
+
+
+
+# Kueri dan Agregasi NoSQL
+
+
+```{python uts-c1, eval=TRUE}
+# (a) Tampilkan merchant Kuliner di Bandung dengan promo cashback dan rating >= 4.0
+query_a = {
+    "kategori": "Kuliner",
+    "kota": "Bandung",
+    "promo": "cashback",
+    "rating": {"$gte": 4.0}
+}
+hasil_a = list(db["merchant"].find(query_a, {"_id": 0, "nama": 1, "rating": 1, "promo": 1}))
+print("--- (a) Merchant Kuliner Bandung (Rating >= 4.0 & Promo Cashback) ---")
+for m in hasil_a:
+    print(m)
+
+# Hitung jumlah merchant yang memiliki field jam_buka
+jumlah_jam_buka = db["merchant"].count_documents({"jam_buka": {"$exists": True}})
+print(f"\n--- (b) Jumlah merchant yang memiliki field jam_buka: {jumlah_jam_buka} ---")
+
+# Aggregation pipeline: jumlah merchant & rata-rata rating per kategori
+pipeline = [
+    {
+        "$group": {
+            "_id": "$kategori",
+            "jumlah_merchant": {"$sum": 1},
+            "rata_rating": {"$avg": "$rating"}
+        }
+    },
+    {
+        "$sort": {"rata_rating": -1}
+    }
+]
+hasil_c = list(db["merchant"].aggregate(pipeline))
+print("\n--- (c) Agregasi Merchant per Kategori ---")
+for row in hasil_c:
+    print(f"Kategori: {row['_id']:<15} | Jumlah: {row['jumlah_merchant']:<3} | Rata-rata Rating: {row['rata_rating']:.2f}")
+```
+
+
+---
+
+
+# Pemrosesan Log dengan Spark RDD
+
+
+```{python uts-c2, eval=TRUE}
+# Accumulator dan Parsing Log
+acc_rusak = sc.accumulator(0)
+
+
+def parse_log(line):
+    global acc_rusak
+    parts = line.split("|")
+    if len(parts) == 6:
+        try:
+            waktu, id_trx, id_user, id_merchant, nominal, status = parts
+            return [(waktu, id_trx, id_user, id_merchant, int(nominal), status)]
+        except ValueError:
+            acc_rusak.add(1)
+            return []
+    else:
+        acc_rusak.add(1)
+        return []
+
+rdd_raw = sc.textFile(jalur_log)
+rdd_parsed = rdd_raw.flatMap(parse_log).cache()
+
+
+# Trigger action untuk menghitung accumulator
+total_valid = rdd_parsed.count()
+print(f"--- (a) Parsing Log ---")
+print(f"Jumlah baris rusak (ditemukan via Accumulator): {acc_rusak.value}")
+print(f"Jumlah baris valid parsed: {total_valid}")
+
+
+# Jumlah transaksi per status dengan reduceByKey
+rdd_status = rdd_parsed.map(lambda x: (x[5], 1)).reduceByKey(lambda a, b: a + b)
+print("\n--- (b) Jumlah Transaksi per Status ---")
+for st, cnt in rdd_status.collect():
+    print(f"Status {st:<8}: {cnt:,}")
+
+
+# Tingkat kegagalan per id_merchant (minimal 1.500 transaksi)
+rdd_m_stats = rdd_parsed.map(
+    lambda x: (x[3], (1, 1 if x[5] == "GAGAL" else 0))
+).reduceByKey(
+    lambda a, b: (a[0] + b[0], a[1] + b[1])
+)
+
+# Filter minimal 1.500 transaksi dan hitung persentase GAGAL
+top5_gagal = (
+    rdd_m_stats
+    .filter(lambda x: x[1][0] >= 1500)
+    .map(lambda x: (x[0], x[1][0], x[1][1], (x[1][1] / x[1][0]) * 100))
+    .takeOrdered(5, key=lambda x: -x[3])
+)
+
+
+print("\n--- (c) Top 5 Merchant dengan Tingkat Kegagalan Tertinggi (>= 1.500 Transaksi) ---")
+for m_id, tot, ggl, pct in top5_gagal:
+    print(f"Merchant ID: {m_id} | Total Trx: {tot:,} | Trx Gagal: {ggl:,} | Tingkat Kegagalan: {pct:.2f}%")
+```
+
+
+
+# Analisis dengan Spark DataFrame dan SQL
+
+
+```{python uts-c3, eval=TRUE}
+from pyspark.sql.types import StructType, StructField, StringType, LongType, TimestampType
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+from datetime import datetime
+
+
+
+# Ubah RDD menjadi DataFrame dengan skema eksplisit
+schema_log = StructType([
+    StructField("waktu", TimestampType(), True),
+    StructField("id_trx", StringType(), True),
+    StructField("id_user", StringType(), True),
+    StructField("id_merchant", StringType(), True),
+    StructField("nominal", LongType(), True),
+    StructField("status", StringType(), True)
+])
+
+
+
+# Mengonversi string timestamp menjadi objek datetime asli Python
+rdd_formatted = rdd_parsed.map(
+    lambda x: (datetime.strptime(x[0], "%Y-%m-%d %H:%M:%S"), x[1], x[2], x[3], int(x[4]), x[5])
+)
+df_trx = spark.createDataFrame(rdd_formatted, schema=schema_log).cache()
+
+
+
+# DataFrame Merchant dari MongoDB & Broadcast Join dengan Transaksi SUKSES Valid
+df_merchant_raw = spark.createDataFrame(merchant)
+df_merchant = df_merchant_raw.select(
+    F.col("_id").alias("m_id"),
+    F.col("kategori"),
+    F.col("kota")
+)
+
+df_sukses_valid = df_trx.filter(
+    (F.col("status") == "SUKSES") & 
+    (F.col("nominal") > 0) & 
+    (F.col("nominal") < 50_000_000)
+)
+
+
+
+# Broadcast Join
+df_joined = df_sukses_valid.join(
+    F.broadcast(df_merchant),
+    df_sukses_valid.id_merchant == df_merchant.m_id,
+    "inner"
+).cache()
+
+
+
+# Total nominal per kota per kategori
+df_kota_kategori = df_joined.groupBy("kota", "kategori").agg(
+    F.sum("nominal").alias("total_nominal"),
+    F.count("id_trx").alias("jumlah_trx")
+)
+
+print("--- (c) Sampel Total Nominal per Kota per Kategori ---")
+df_kota_kategori.show(5)
+
+
+
+# Window Function: Kategori teratas di setiap kota beserta porsinya (%)
+window_kota = Window.partitionBy("kota")
+window_rank = Window.partitionBy("kota").orderBy(F.desc("total_nominal"))
+
+df_porsi = df_kota_kategori.withColumn(
+    "total_kota", F.sum("total_nominal").over(window_kota)
+).withColumn(
+    "porsi_pct", F.round((F.col("total_nominal") / F.col("total_kota")) * 100, 2)
+).withColumn(
+    "rank", F.rank().over(window_rank)
+)
+
+df_top_kategori = df_porsi.filter(F.col("rank") == 1).select(
+    "kota", "kategori", "total_nominal", "total_kota", "porsi_pct"
+).orderBy("kota")
+
+print("--- (d) Kategori Teratas di Setiap Kota beserta Porsi (%) ---")
+df_top_kategori.show()
+```
+
+
+---
+
+
+# Ingestion dengan Structured Streaming
+
+
+
+```{python uts-c4, eval=TRUE}
+import shutil
+from pyspark.sql.types import StructType, StructField, StringType, LongType
+from pyspark.sql import functions as F
+
+# Skema eksplisit
+schema_streaming = StructType([
+    StructField("id_trx", StringType(), True),
+    StructField("id_merchant", StringType(), True),
+    StructField("nominal", LongType(), True),
+    StructField("waktu", StringType(), True)
+])
+
+
+dir_parquet = "C:/hadoop/parquet_output"
+dir_checkpoint = "C:/hadoop/checkpoint_output"
+
+shutil.rmtree(dir_parquet, ignore_errors=True)
+shutil.rmtree(dir_checkpoint, ignore_errors=True)
+
+df_stream = (
+    spark.readStream
+    .schema(schema_streaming)
+    .json(landing)
+)
+
+batch_counter = 0
+
+
+# foreachBatch untuk filter, simpan, dan catat
+def process_batch(batch_df, batch_id):
+    global batch_counter
+    batch_counter += 1
+    
+    df_valid = batch_df.filter(F.col("nominal").isNotNull())
+    df_invalid = batch_df.filter(F.col("nominal").isNull())
+    
+    print(f"Batch {batch_id} | Valid: {df_valid.count()} event | Tidak Valid (Null): {df_invalid.count()} event")
+    df_valid.write.mode("append").parquet(dir_parquet)
+
+
+# Trigger streaming
+query_stream = (
+    df_stream.writeStream
+    .trigger(availableNow=True)
+    .option("checkpointLocation", dir_checkpoint)
+    .foreachBatch(process_batch)
+    .start()
+)
+
+query_stream.awaitTermination()
+
+
+# Verifikasi hasil Parquet
+df_parquet_result = spark.read.parquet(dir_parquet)
+print(f"\n--- Total Baris Terdaftar di Folder Parquet: {df_parquet_result.count():,} ---")
+```
+
+
+
+---
+
+
+
+# EDA Skala Besar dan Insight
+
+
+
+```{python uts-c5, eval=TRUE}
+import matplotlib.pyplot as plt
+
+# (a) Laporan kualitas data dalam satu select
+laporan_kualitas = df_trx.select(
+    F.count(F.when(F.col("nominal") < 0, 1)).alias("jumlah_nominal_negatif"),
+    F.count(F.when(F.col("nominal") >= 50_000_000, 1)).alias("jumlah_nominal_ekstrem"),
+    F.count(F.when(F.col("status") == "PENDING", 1)).alias("jumlah_status_pending")
+)
+
+print("--- (a) Laporan Kualitas Data ---")
+laporan_kualitas.show()
+
+# (b) Persentil nominal transaksi valid (0 < nominal < 50 juta)
+quantiles = df_sukses_valid.approxQuantile("nominal", [0.05, 0.50, 0.95, 0.99], 0.01)
+print(f"--- (b) Kuantil Nominal Valid ---")
+print(f"P5  : Rp {quantiles[0]:,.2f}")
+print(f"P50 : Rp {quantiles[1]:,.2f}")
+print(f"P95 : Rp {quantiles[2]:,.2f}")
+print(f"P99 : Rp {quantiles[3]:,.2f}")
+
+# (c) Jumlah transaksi SUKSES per jam (0-23) dan Grafik Batang
+df_jam = df_sukses_valid.withColumn("jam", F.hour("waktu")).groupBy("jam").agg(
+    F.count("id_trx").alias("jumlah_trx")
+).orderBy("jam")
+
+pd_jam = df_jam.toPandas()
+
+plt.figure(figsize=(10, 4))
+plt.bar(pd_jam["jam"], pd_jam["jumlah_trx"], color="skyblue", edgecolor="navy");
+plt.title("Distribusi Transaksi SUKSES per Jam");
+plt.xlabel("Jam (0 - 23)");
+plt.ylabel("Jumlah Transaksi");
+plt.xticks(range(0, 24));
+plt.grid(axis="y", linestyle="--", alpha=0.7);
+plt.tight_layout();
+plt.show();
+```
+
+
+
+# Insight Bisnis & Operasional**
+
+:::{.callout-note title="Insight 1"}
+
+**Tingkat Anomali Sistem dan Data Rusak pada Ingestion**
+
+   - **Temuan:** Ditemukan 80 baris transaksi dengan nilai ekstrem Rp250 juta, 150 transaksi nominal negatif (-1), dan 80 baris rusak akibat error jaringan.
+   
+   - **Bukti:** Laporan kualitas data mencatat persis nilai anomali ini pada dataset transaksi, serta accumulator mencatat 80 baris rusak pada pemrosesan log mentah.
+   
+   - **Tindakan:** Mengimplementasikan *data validation gate* otomatis di tingkat ingestion streaming Kafka/Spark untuk memfilter baris bernilai negatif atau *corrupt* secara real-time ke *Dead Letter Queue (DLQ)* sebelum masuk ke database utama.
+   
+:::
+
+
+---
+
+
+:::{.callout-note title="Insight 2"}
+
+**Pola Beban Transaksi Puncak Harian**
+
+   - **Temuan:** Distribusi transaksi harian merata namun memiliki puncak aktivitas pada jam harian tertentu.
+   
+   - **Bukti:** Grafik histogram menunjukkan distribusi jumlah transaksi sukses per jam dari 0 hingga 23.
+   
+   - **Tindakan:** Mengatur strategi *autoscaling* pada pod mikroservis pemrosesan pembayaran sebelum jam sibuk harian guna mengurangi tingkat latensi dan kegagalan transaksi (*status GAGAL*).
+
+:::
+
+
+
+
+
+
+
+
+
+
+

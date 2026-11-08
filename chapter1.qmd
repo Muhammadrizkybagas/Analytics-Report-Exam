@@ -1,0 +1,234 @@
+---
+title: "Midterm Exam Report: BayarYuk Digital Wallet Big Data Pipeline"
+author:
+    - name: Muhammad Rizky Bagas
+date: today
+format: html
+---
+
+**NIM:** 52240006
+
+
+# Pendahuluan
+
+**Konteks Sesi:** Pertemuan 8 adalah **Ujian Tengah Semester (UTS)** yang mengevaluasi penguasaan materi **Pertemuan 1–7**: konsep dan arsitektur Big Data, basis data NoSQL, HDFS, Spark RDD, Spark DataFrame dan SQL, *data ingestion*, serta EDA skala besar. Studi kasus menggunakan platform dompet digital **"BayarYuk"**.
+
+
+
+
+# Pilihan Ganda
+
+
+**A1.** Data GPS 2 juta pengemudi ojek daring yang diperbarui setiap 3 detik paling menonjol pada karakteristik ...
+
+(a) Variety 
+(b) Velocity 
+(c) Veracity 
+(d) Value
+
+**Jawaban:** **(b) Velocity**
+
+> Frekuensi pembaruan data yang sangat cepat (setiap 3 detik) dari 2 juta pengemudi mencerminkan kecepatan alir data (*velocity*) tinggi dalam skala waktu nyata (*real-time*).
+
+
+---
+
+
+**A2.** Basis data yang paling tepat untuk menyimpan sesi login dengan masa berlaku 30 menit adalah ...
+
+(a) Neo4j 
+(b) MongoDB 
+(c) Redis 
+(d) HDFS
+
+**Jawaban:** **(c) Redis**
+
+> Redis merupakan *key-value store* berbasis memori (in-memory) yang mendukung fitur masa berlaku otomatis (TTL/Time-To-Live), sangat ideal untuk penyimpanan data sesi login sementara.
+
+
+---
+
+
+**A3.** Pada MongoDB, tahap *aggregation pipeline* yang memecah elemen array menjadi dokumen terpisah adalah ...
+
+(a) `$match` 
+(b) `$group` 
+(c) `$unwind` 
+(d) `$project`
+
+**Jawaban:** **(c) `$unwind`**
+
+> Tahap `$unwind` pada *aggregation pipeline* MongoDB berfungsi untuk menguraikan (*flatten*) elemen-elemen di dalam sebuah *array* menjadi dokumen tersendiri.
+
+
+---
+
+
+**A4.** Berkas 700 MB diunggah ke HDFS dengan blok 128 MB dan replikasi 3. Jumlah blok dan ruang disk yang terpakai adalah ...
+
+(a) 5 blok, 700 MB 
+(b) 6 blok, 2.100 MB 
+(c) 6 blok, 2.304 MB 
+(d) 18 blok, 2.304 MB
+
+**Jawaban:** **(c) 6 blok, 2.304 MB**
+
+> Berkas 700 MB dipotong menjadi $\lceil 700 / 128 \rceil = 6$ blok. Dengan faktor replikasi 3, total blok fisik menjadi $6 \times 3 = 18$ blok, memakan ruang disk sebesar $6 \text{ blok} \times 128 \text{ MB} \times 3 = 2.304 \text{ MB}$.
+
+
+---
+
+
+**A5.** Komponen HDFS yang menyimpan metadata lokasi blok adalah ...
+
+(a) DataNode 
+(b) NameNode 
+(c) Secondary NameNode 
+(d) ResourceManager
+
+**Jawaban:** **(b) NameNode**
+
+> Dalam arsitektur HDFS, NameNode bertanggung jawab mengelola struktur direktori dan menyimpan metadata mengenai pemetaan letak blok data di DataNode.
+
+
+---
+
+
+**A6.** Operasi Spark berikut yang merupakan **aksi** adalah ...
+
+(a) `map` 
+(b) `filter` 
+(c) `reduceByKey` 
+(d) `count`
+
+**Jawaban:** **(d) count**
+
+> `count` adalah operasi *Action* yang mengeksekusi komputasi lazy dan mengembalikan nilai ke program driver, sedangkan `map`, `filter`, dan `reduceByKey` merupakan *Transformation*.
+
+
+---
+
+
+**A7.** Untuk menjumlahkan nilai per kunci pada pair RDD besar, operasi yang paling efisien adalah ...
+
+(a) `groupByKey().mapValues(sum)` 
+(b) `reduceByKey(lambda a, b: a + b)` 
+(c) `collect()` lalu dijumlah di Python 
+(d) `sortByKey()`
+
+**Jawaban:** **`(b) reduceByKey(lambda a, b: a + b)`**
+
+> `reduceByKey` melakukan penggabungan data secara lokal di tingkat pemeta (*map-side combine*) sebelum data ditransfer antar *worker*, sehingga jauh lebih efisien dalam penggunaan jaringan daripada `groupByKey`.
+
+
+---
+
+
+**A8.** Mengapa skema eksplisit lebih disarankan daripada `inferSchema=True` pada *pipeline* produksi?
+
+(a) Skema eksplisit membuat data terkompresi 
+(b) Lebih cepat, tidak salah tebak tipe, dan terdokumentasi 
+(c) `inferSchema` tidak dapat membaca CSV 
+(d) Skema eksplisit wajib untuk Parquet
+
+**Jawaban:** **(b) Lebih cepat, tidak salah tebak tipe, dan terdokumentasi**
+
+> Menentukan skema secara eksplisit menghindarkan Spark dari pembacaan dataset secara berkala (*extra job scan*) untuk menebak tipe data, sehingga proses ingestion lebih cepat dan aman.
+
+
+---
+
+
+**A9.** Topic Kafka memiliki 4 partisi dan *consumer group* memiliki 6 konsumen. Berapa konsumen yang aktif membaca?
+
+(a) 2 
+(b) 4 
+(c) 6 
+(d) 24
+
+**Jawaban:** **(b) 4**
+
+> Dalam Kafka, satu partisi dalam suatu *topic* hanya dapat dibaca oleh maksimal satu konsumen dalam *consumer group* yang sama, sehingga 2 konsumen sisanya akan berada pada posisi *idle*.
+
+
+---
+
+
+**A10.** Cara yang benar membuat histogram kolom `jarak_km` dari 2 miliar baris adalah ...
+
+(a) `df.toPandas()["jarak_km"].hist()` 
+(b) `df.collect()` lalu `plt.hist` 
+(c) Menghitung jumlah per *bin* dengan `groupBy` di Spark, lalu menggambar hasilnya 
+(d) Mengambil 10 baris pertama
+
+**Jawaban:** **(c) Menghitung jumlah per bin dengan groupBy di Spark, lalu menggambar hasilnya**
+
+> Mengolah dan merangkum 2 miliar baris di dalam kluster terdistribusi (Spark) terlebih dahulu memastikan beban memori driver tetap aman sebelum mengirimkan hasil agregasi kecil untuk visualisasi.
+
+---
+
+
+# Esai Singkat
+
+**B1.** Jelaskan perbedaan *scale-up* dan *scale-out*, dan jelaskan mengapa fase *shuffle* pada MapReduce/Spark merupakan bagian yang paling mahal.
+
+:::{.callout-note title="Jawaban"}
+
+- **Scale-up (Vertical Scaling):** Menambah kapasitas sumber daya (CPU, RAM, Storage) pada satu mesin tunggal. Memiliki batas fisik dan harga yang sangat mahal.
+
+- **Scale-out (Horizontal Scaling):** Menambah jumlah mesin/node berbiaya standar ke dalam kluster terdistribusi. Lebih fleksibel dan ekonomis untuk Big Data.
+
+- **Mengapa Shuffle Paling Mahal?**  
+
+> Fase *shuffle* pada MapReduce/Spark mengharuskan pengiriman data antar *node* melalui jaringan (I/O jaringan), penulisan data sementara ke dalam disk (I/O disk), serta proses serialisasi/deserialisasi data. Hal ini menciptakan kemacetan (*bottleneck*) ketersediaan *bandwidth* dan waktu tunggu komputasi.
+  
+:::
+
+
+---
+
+
+**B2.** Sebuah *marketplace* membutuhkan: (i) katalog produk dengan atribut berbeda per kategori, (ii) keranjang belanja sementara, (iii) rekomendasi "teman Anda juga membeli". Pilih basis data NoSQL untuk masing-masing dan jelaskan alasannya.
+
+:::{.callout-note title="Jawaban"}
+1. **Katalog produk:** **Document-based (MongoDB)**. Mendukung skema fleksibel (*schemaless*), sehingga produk pakaian dan elektronik dengan atribut berbeda dapat disimpan dalam struktur JSON/BSON tanpa mengubah skema tabel utama.
+
+2. **Keranjang belanja sementara:** **Key-Value Store (Redis)**. Menawarkan operasi baca/tulis *in-memory* yang sangat cepat dengan dukungan fitur penentuan waktu kadaluarsa (TTL) otomatis.
+
+3. **Rekomendasi "Teman Anda Juga Membeli":** **Graph Database (Neo4j)**. Sangat optimal dalam memodelkan hubungan/relasi kompleks antar entitas (pengguna, produk, teman) dan melakukan kueri penelusuran graf (*graph traversal*) secara cepat.
+:::
+
+
+---
+
+
+**B3.** Jelaskan konsep *lazy evaluation* dan *lineage* pada Spark, serta manfaat masing-masing.
+
+:::{.callout-note title="Jawaban"}
+- **Lazy Evaluation:** Spark tidak langsung mengeksekusi operasi *transformation* saat dipanggil, melainkan hanya mencatatnya dalam bentuk Directed Acyclic Graph (DAG). Manfaatnya memungkinkan Spark Catalyst Optimizer melakukan optimasi jalur eksekusi global (seperti *predicate pushdown*) sebelum data diproses saat *Action* dipanggil.
+
+- **Lineage Graph:** Rekaman riwayat silsilah atau langkah-langkah transformasi yang diterapkan pada RDD/DataFrame dari sumber data awal. Manfaatnya menyediakan mekanisme toleransi kesalahan (*fault tolerance*). Jika ada partisi yang rusak, Spark dapat menghitung ulang partisi tersebut berdasarkan grafik *lineage*.
+
+:::
+
+
+---
+
+
+**B4.** Jelaskan perbedaan jaminan pengiriman *at-most-once* dan *at-least-once*, dan bagaimana *checkpoint* pada Spark Structured Streaming membantu mencegah data hilang atau terproses ganda.
+
+::: {.callout-note title="Jawaban"}
+
+- **At-Most-Once:** Pesan dikirim maksimal satu kali tanpa penanganan ulang jika terjadi kegagalan. Berisiko kehilangan data (*data loss*), tetapi tidak berpotensi duplikat.
+
+- **At-Least-Once:** Pesan dijamin terkirim dan diproses minimal satu kali. Tidak ada data yang hilang, tetapi berpotensi memunculkan data duplikat jika terjadi pengiriman ulang.
+
+- **Peran Checkpoint:** *Checkpointing* mencatat status pemrosesan (*offset* pesan yang berhasil dibaca) dan metadata kueri secara berkala ke media penyimpanan andal. Jika terjadi kegagalan sistem, Spark dapat melanjutkan pemrosesan dari *offset* terakhir yang dicatat, mencegah kehilangan data dan menjamin pemrosesan *exactly-once*.
+
+:::
+
+
+
+
+
+
